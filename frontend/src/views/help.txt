@@ -1,0 +1,520 @@
+<script>
+import AuthService from '@/services/auth'
+
+export default {
+  name: 'InvestmentPage',
+  data() {
+    return {
+      currentBalance: 0,
+      showBalance: true,
+      refreshing: false,
+      isInvesting: false,
+      isProcessing: false,
+      selectedProduct: null,
+      selectedFilter: 'all',
+      successMessage: '',
+      errorMessage: '',
+      activeInvestments: [],
+      totalEarnings: 0,
+      isMining: false,
+      miningCooldownEnd: null,
+      miningProgress: 0,
+      miningTimeRemaining: '',
+      miningInterval: null,
+      lastMiningTime: null,
+      userEarnings: 0,
+      
+      products: [
+        {
+          name: 'Silver',
+          icon: '🥈',
+          tier: 'Basic Plan',
+          rate: 0.09,
+          minAmount: 100,
+          investmentAmount: '',
+          error: '',
+          premium: false
+        },
+        {
+          name: 'Gold',
+          icon: '🥇',
+          tier: 'Popular Plan',
+          rate: 0.19,
+          minAmount: 300,
+          investmentAmount: '',
+          error: '',
+          premium: false
+        },
+        {
+          name: 'Diamond',
+          icon: '💎',
+          tier: 'Premium Plan',
+          rate: 0.23,
+          minAmount: 1000,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        },
+        {
+          name: 'Platinum',
+          icon: '⭐',
+          tier: 'Elite Plan',
+          rate: 0.37,
+          minAmount: 2500,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        },
+        {
+          name: 'Emerald',
+          icon: '💚',
+          tier: 'VIP Plan',
+          rate: 0.41,
+          minAmount: 5000,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        },
+        {
+          name: 'Ruby',
+          icon: '❤️',
+          tier: 'Exclusive Plan',
+          rate: 0.45,
+          minAmount: 10000,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        },
+        {
+          name: 'Crown',
+          icon: '👑',
+          tier: 'Royal Plan',
+          rate: 0.49,
+          minAmount: 25000,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        },
+        {
+          name: 'Infinity',
+          icon: '♾️',
+          tier: 'Ultimate Plan',
+          rate: 0.34,
+          minAmount: 50000,
+          investmentAmount: '',
+          error: '',
+          premium: true
+        }
+      ]
+    }
+  },
+  
+  computed: {
+    userId() {
+      return localStorage.getItem('user_id')
+    },
+    userUsername() {
+      return localStorage.getItem('username') || 'User'
+    },
+    canMine() {
+      // User must have active investments to be eligible for mining
+      if (!this.activeInvestments || this.activeInvestments.length === 0) {
+        return false;
+      }
+      
+      // Check if user is in cooldown period
+      if (!this.miningCooldownEnd) return true;
+      return Date.now() > this.miningCooldownEnd;
+    }, 
+    miningButtonText() {
+      if (!this.activeInvestments || this.activeInvestments.length === 0) {
+        return 'Invest First to Mine';
+      }
+      if (this.isProcessing) return 'Mining...';
+      if (this.isMining) return `Mining (${this.miningTimeRemaining})`;
+      if (!this.canMine) return `Cooldown (${this.miningTimeRemaining})`;
+      return 'Start Mining';
+    },
+    miningButtonDisabled() {
+      // Disable if no investments, processing, or in cooldown
+      return this.activeInvestments.length === 0 || this.isProcessing || !this.canMine;
+    },
+    filteredProducts() {
+      if (this.selectedFilter === 'available') {
+        return this.products.filter(product => this.canAffordProduct(product))
+      } else if (this.selectedFilter === 'locked') {
+        return this.products.filter(product => !this.canAffordProduct(product))
+      }
+      return this.products
+    }
+  },
+  
+  methods: {
+    async fetchData() {
+      try {
+        if (!this.userId) {
+          this.errorMessage = 'Please log in to access investments'
+          return
+        }
+        
+        // Get user data and active purchases
+        const [userResponse, purchasesResponse] = await Promise.all([
+          AuthService.getCurrentUser(),
+          AuthService.getMyPurchases({ active_only: true })
+        ])
+        
+        if (userResponse && userResponse.balance !== undefined) {
+          this.currentBalance = userResponse.balance
+        }
+        
+        if (purchasesResponse && purchasesResponse.items) {
+          this.activeInvestments = purchasesResponse.items
+          this.totalEarnings = this.activeInvestments.reduce((sum, inv) => sum + (inv.total_earnings_credited || 0), 0)
+        }
+        
+      } catch (error) {
+        console.error('Error fetching data:', error)
+        this.errorMessage = 'Unable to fetch investment data'
+      }
+    },
+
+    async refreshBalance() {
+      this.refreshing = true
+      try {
+        const userResponse = await AuthService.getCurrentUser()
+        if (userResponse && userResponse.balance !== undefined) {
+          this.currentBalance = userResponse.balance
+        }
+      } catch (error) {
+        console.error('Error refreshing balance:', error)
+        this.errorMessage = 'Unable to refresh balance'
+      } finally {
+        this.refreshing = false
+      }
+    },
+
+    canAffordProduct(product) {
+      return this.currentBalance >= product.minAmount
+    },
+
+    validateInvestmentAmount(product) {
+      product.error = ''
+      const amount = parseFloat(product.investmentAmount)
+      
+      if (isNaN(amount) || amount <= 0) {
+        product.error = 'Please enter a valid amount'
+        return
+      }
+      
+      if (amount < product.minAmount) {
+        product.error = `Minimum investment is ${this.formatAmount(product.minAmount)} GHS`
+        return
+      }
+      
+      if (amount > this.currentBalance) {
+        product.error = 'Insufficient balance'
+        return
+      }
+    },
+
+    setMaxInvestment(product) {
+      if (this.canAffordProduct(product)) {
+        product.investmentAmount = this.currentBalance.toString()
+        this.validateInvestmentAmount(product)
+      }
+    },
+
+    calculateDailyEarning(product) {
+      if (!product.investmentAmount || product.error) return 0
+      return parseFloat(product.investmentAmount) * product.rate
+    },
+
+    calculateTotalReturn(product) {
+      if (!product.investmentAmount || product.error) return 0
+      const principal = parseFloat(product.investmentAmount)
+      const totalEarnings = principal * product.rate * 30
+      return principal + totalEarnings
+    },
+
+    async investInProduct(product) {
+      if (!product.investmentAmount || product.error) return
+      
+      this.isInvesting = true
+      this.selectedProduct = product.name
+      this.errorMessage = ''
+      this.successMessage = ''
+      
+      try {
+        const investmentData = {
+          product_name: product.name,
+          purchase_price: parseFloat(product.investmentAmount),
+          daily_earning_rate: product.rate,
+          earning_duration_days: 30,
+          product_description: `${product.name} investment plan with ${(product.rate * 100).toFixed(2)}% daily returns`
+        }
+        
+        const response = await AuthService.createPurchase(investmentData)
+        
+        // Calculate user's total daily earnings from all active investments
+        this.userEarnings = this.calculateTotalUserEarnings()
+        
+        this.successMessage = `Successfully invested ${this.formatAmount(product.investmentAmount)} GHS in ${product.name}! Reference: ${response.reference_number}`
+        
+        // Reset form and refresh data
+        product.investmentAmount = ''
+        product.error = ''
+        await this.fetchData()
+        
+      } catch (error) {
+        console.error('Investment error:', error)
+        this.errorMessage = error.response?.data?.detail || 'Failed to create investment. Please try again.'
+      } finally {
+        this.isInvesting = false
+        this.selectedProduct = null
+      }
+    },
+
+    formatAmount(amount) {
+      return parseFloat(amount || 0).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      })
+    },
+
+    goToDeposit() {
+      this.$router.push('/deposit')
+    },
+
+    viewAllInvestments() {
+      this.$router.push('/investments/history')
+    },
+
+    async startMining() {
+      // Prevent mining if user has no active investments
+      if (!this.activeInvestments || this.activeInvestments.length === 0) {
+        this.errorMessage = 'You must have active investments before you can start mining.';
+        return;
+      }
+
+      if (!this.canMine) return;
+      
+      this.isProcessing = true;
+      this.errorMessage = '';
+      this.successMessage = '';
+
+      try {
+        // Calculate total daily earnings from all active investments
+        const totalDailyEarnings = this.calculateTotalUserEarnings();
+        
+        if (totalDailyEarnings <= 0) {
+          this.errorMessage = 'No earnings available for mining. Please check your active investments.';
+          return;
+        }
+
+        const earningData = {
+          amount: parseFloat(totalDailyEarnings),
+          status: "ACTIVE",
+          created_at: new Date().toISOString()
+        }
+
+        const response = await AuthService.createEarning(earningData);
+
+        this.successMessage = `Successfully mined ${this.formatAmount(response.amount)} GHS! Reference: ${response.id}`;
+        
+        // Start 24-hour cooldown (user-specific)
+        this.startMiningCooldown();
+        
+        await this.fetchData(); // refresh balance + earnings
+      } catch (error) {
+        console.error('Error starting mining:', error);
+        this.errorMessage = error.response?.data?.detail || 'Mining failed. Please try again.';
+      } finally {
+        this.isProcessing = false;
+      }
+    },
+
+    calculateTotalUserEarnings() {
+      if (!this.activeInvestments || this.activeInvestments.length === 0) {
+        return 0;
+      }
+      
+      return this.activeInvestments.reduce((total, investment) => {
+        return total + (investment.purchase_price * investment.daily_earning_rate);
+      }, 0);
+    },
+
+    startMiningCooldown() {
+      const now = Date.now();
+      const cooldownDuration = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+      
+      this.lastMiningTime = now;
+      this.miningCooldownEnd = now + cooldownDuration;
+      this.isMining = true;
+      
+      // Store in localStorage with user ID to make it user-specific
+      const userSpecificKey = `lastMiningTime_${this.userId}`;
+      const userCooldownKey = `miningCooldownEnd_${this.userId}`;
+      
+      localStorage.setItem(userSpecificKey, now.toString());
+      localStorage.setItem(userCooldownKey, this.miningCooldownEnd.toString());
+      
+      this.startMiningProgressUpdate();
+    },
+
+    startMiningProgressUpdate() {
+      this.miningInterval = setInterval(() => {
+        const now = Date.now();
+        const totalDuration = 24 * 60 * 60 * 1000; // 24 hours
+        const elapsed = now - this.lastMiningTime;
+        const remaining = this.miningCooldownEnd - now;
+        
+        if (remaining <= 0) {
+          // Mining complete
+          this.completeMining();
+          return;
+        }
+        
+        // Update progress (0 to 100)
+        this.miningProgress = (elapsed / totalDuration) * 100;
+        
+        // Update time remaining display
+        this.miningTimeRemaining = this.formatTimeRemaining(remaining);
+        
+      }, 1000); // Update every second
+    },
+
+    completeMining() {
+      this.isMining = false;
+      this.miningProgress = 100;
+      this.miningCooldownEnd = null;
+      this.lastMiningTime = null;
+      this.miningTimeRemaining = '';
+      
+      // Clear user-specific localStorage
+      const userSpecificKey = `lastMiningTime_${this.userId}`;
+      const userCooldownKey = `miningCooldownEnd_${this.userId}`;
+      
+      localStorage.removeItem(userSpecificKey);
+      localStorage.removeItem(userCooldownKey);
+      
+      // Clear interval
+      if (this.miningInterval) {
+        clearInterval(this.miningInterval);
+        this.miningInterval = null;
+      }
+      
+      // Show completion notification
+      this.successMessage = 'Mining cycle completed! You can start mining again.';
+    },
+
+    formatTimeRemaining(milliseconds) {
+      const totalSeconds = Math.floor(milliseconds / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      
+      if (hours > 0) {
+        return `${hours}h ${minutes}m ${seconds}s`;
+      } else if (minutes > 0) {
+        return `${minutes}m ${seconds}s`;
+      } else {
+        return `${seconds}s`;
+      }
+    },
+
+    checkExistingMiningCooldown() {
+      // Only check mining cooldown if user is logged in
+      if (!this.userId) {
+        // Clear any mining state if no user is logged in
+        this.clearMiningState();
+        return;
+      }
+      
+      const userSpecificKey = `lastMiningTime_${this.userId}`;
+      const userCooldownKey = `miningCooldownEnd_${this.userId}`;
+      
+      const lastMiningTime = localStorage.getItem(userSpecificKey);
+      const miningCooldownEnd = localStorage.getItem(userCooldownKey);
+      
+      if (lastMiningTime && miningCooldownEnd) {
+        const now = Date.now();
+        const cooldownEnd = parseInt(miningCooldownEnd);
+        
+        // Validate that the stored times are reasonable (not corrupted)
+        const storedLastTime = parseInt(lastMiningTime);
+        if (isNaN(storedLastTime) || isNaN(cooldownEnd) || storedLastTime > now || cooldownEnd < storedLastTime) {
+          // Invalid data, clean up
+          this.clearMiningState();
+          return;
+        }
+        
+        if (now < cooldownEnd) {
+          // Still in cooldown
+          this.lastMiningTime = storedLastTime;
+          this.miningCooldownEnd = cooldownEnd;
+          this.isMining = true;
+          this.startMiningProgressUpdate();
+        } else {
+          // Cooldown expired, clean up
+          this.clearMiningState();
+        }
+      }
+    },
+  
+  watch: {
+    // Watch for userId changes (login/logout/user switch)
+    userId(newUserId, oldUserId) {
+      if (newUserId !== oldUserId) {
+        console.log('User ID changed from', oldUserId, 'to', newUserId);
+        this.handleUserChange();
+      }
+    }
+  },
+
+    clearMiningState() {
+      // Clear mining state variables
+      this.isMining = false;
+      this.miningProgress = 0;
+      this.miningCooldownEnd = null;
+      this.lastMiningTime = null;
+      this.miningTimeRemaining = '';
+      
+      // Clear mining interval if running
+      if (this.miningInterval) {
+        clearInterval(this.miningInterval);
+        this.miningInterval = null;
+      }
+      
+      // Clear localStorage for current user if exists
+      if (this.userId) {
+        const userSpecificKey = `lastMiningTime_${this.userId}`;
+        const userCooldownKey = `miningCooldownEnd_${this.userId}`;
+        localStorage.removeItem(userSpecificKey);
+        localStorage.removeItem(userCooldownKey);
+      }
+      
+      // Also clear any orphaned mining data from localStorage
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith('lastMiningTime_') || key.startsWith('miningCooldownEnd_')) {
+          // Only remove if it's not for the current user
+          const userId = key.split('_')[1];
+          if (!this.userId || userId !== this.userId) {
+            localStorage.removeItem(key);
+          }
+        }
+      });
+    }},
+
+  mounted() {
+    this.fetchData();
+    this.checkExistingMiningCooldown(); // Check for existing cooldown on page load
+  },
+
+  // Add this to handle cleanup when component is destroyed
+  beforeUnmount() {
+    if (this.miningInterval) {
+      clearInterval(this.miningInterval);
+    }
+}
+}
+</script>
